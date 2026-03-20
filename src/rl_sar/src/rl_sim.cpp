@@ -500,6 +500,76 @@ void RL_Sim::RunModel()
     }
 }
 
+
+class TargetMotions {
+
+    """
+        Class to build target motion observation array
+    """
+
+    std::vector<float> build_target_obs(tar_frame_steps, ){
+        // Internal function to construct sequence of target frames for future timesteps. Returns array of target frames
+
+        std::vector<float> tar_poses;
+
+        float time0 = this->_get_motion_time();
+        float dt = self._env.env_time_step;
+        std::vector<float> motion = self.get_active_motion();
+
+        // robot = self._env.robot
+        std::vector<float> ref_base_pos = self._get_ref_base_position();
+        std::vector<float> sim_base_rot = np.array(robot.GetBaseOrientation());
+
+        // heading = motion_util.calc_heading(sim_base_rot)
+        // if self._tar_obs_noise is not None:
+        //   heading += self._randn(0, self._tar_obs_noise[0])
+        // inv_heading_rot = transformations.quaternion_about_axis(-heading, [0, 0, 1])
+
+        for (int& step : self._tar_frame_steps){
+
+            float tar_time = time0 + step * dt
+            std::vector<float> tar_pose = self._calc_ref_pose(tar_time)
+
+            std::vector<float> tar_root_pos = motion.get_frame_root_pos(tar_pose)
+            std::vector<float> tar_root_rot = motion.get_frame_root_rot(tar_pose)
+
+            tar_root_pos -= ref_base_pos
+            tar_root_pos = pose3d.QuaternionRotatePoint(tar_root_pos, inv_heading_rot)
+
+            tar_root_rot = transformations.quaternion_multiply(inv_heading_rot, tar_root_rot)
+            tar_root_rot = motion_util.standardize_quaternion(tar_root_rot)
+
+            motion.set_frame_root_pos(tar_root_pos, tar_pose)
+            motion.set_frame_root_rot(tar_root_rot, tar_pose)
+
+            tar_poses.append(tar_pose)
+        }
+       
+
+        std::vector<float> tar_obs = np.concatenate(tar_poses, axis=-1);
+
+        return tar_obs;
+
+    }
+
+    // ==================================== Private Methods ===========================================================
+
+    float _get_motion_time() {
+
+    }
+
+    std::vector<float> _get_active_motion(){
+
+    }
+
+    std::vector<float> _get_ref_base_position(){
+
+    }
+
+
+}
+
+// =======================================================================================================================
 std::vector<float> RL_Sim::Forward()
 {
     std::unique_lock<std::mutex> lock(this->model_mutex, std::try_to_lock);
@@ -518,6 +588,9 @@ std::vector<float> RL_Sim::Forward()
     {
         this->history_obs_buf.insert(clamped_obs);
         this->history_obs = this->history_obs_buf.get_obs_vec(this->params.Get<std::vector<int>>("observations_history"));
+        // TODO: add the 4 ref motions obs here
+        this->history_obs = this->history_obs.insert(TargetMotions.get_ref_motions())
+
         actions = this->model->forward({this->history_obs});
     }
     else

@@ -95,6 +95,7 @@ std::vector<float> RL::ComputeObservation()
         }
         else if (observation == "dof_pos")
         {
+            // relative pos
             std::vector<float> dof_pos_rel = this->obs.dof_pos - this->params.Get<std::vector<float>>("default_dof_pos");
             for (int i : this->params.Get<std::vector<int>>("wheel_indices"))
             {
@@ -109,6 +110,10 @@ std::vector<float> RL::ComputeObservation()
         else if (observation == "actions")
         {
             obs_list.push_back(this->obs.actions);
+        }
+        else if (observation == "dof_pos_abs")
+        {
+            obs_list.push_back(this->obs.dof_pos * this->params.Get<float>("dof_pos_scale"));
         }
         // ============= Other Observations =============
         else if (observation == "whole_body_tracking/motion_command")

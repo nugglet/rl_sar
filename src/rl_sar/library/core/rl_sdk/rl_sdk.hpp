@@ -180,6 +180,7 @@ struct Observations
     std::vector<T> dof_pos;
     std::vector<T> dof_vel;
     std::vector<T> actions;
+    std::vector<T> dof_pos_abs;
 };
 
 class RL
