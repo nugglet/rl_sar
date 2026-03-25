@@ -456,6 +456,7 @@ void RL_Sim::RobotStateCallback(const robot_msgs::msg::RobotState::SharedPtr msg
 #endif
 
 void RL_Sim::RunModel()
+// Modify this to add in reading in and generating ref motions
 {
     if (this->rl_init_done && simulation_running)
     {
@@ -500,76 +501,6 @@ void RL_Sim::RunModel()
     }
 }
 
-
-class TargetMotions {
-
-    """
-        Class to build target motion observation array
-    """
-
-    std::vector<float> build_target_obs(tar_frame_steps, ){
-        // Internal function to construct sequence of target frames for future timesteps. Returns array of target frames
-
-        std::vector<float> tar_poses;
-
-        float time0 = this->_get_motion_time();
-        float dt = self._env.env_time_step;
-        std::vector<float> motion = self.get_active_motion();
-
-        // robot = self._env.robot
-        std::vector<float> ref_base_pos = self._get_ref_base_position();
-        std::vector<float> sim_base_rot = np.array(robot.GetBaseOrientation());
-
-        // heading = motion_util.calc_heading(sim_base_rot)
-        // if self._tar_obs_noise is not None:
-        //   heading += self._randn(0, self._tar_obs_noise[0])
-        // inv_heading_rot = transformations.quaternion_about_axis(-heading, [0, 0, 1])
-
-        for (int& step : self._tar_frame_steps){
-
-            float tar_time = time0 + step * dt
-            std::vector<float> tar_pose = self._calc_ref_pose(tar_time)
-
-            std::vector<float> tar_root_pos = motion.get_frame_root_pos(tar_pose)
-            std::vector<float> tar_root_rot = motion.get_frame_root_rot(tar_pose)
-
-            tar_root_pos -= ref_base_pos
-            tar_root_pos = pose3d.QuaternionRotatePoint(tar_root_pos, inv_heading_rot)
-
-            tar_root_rot = transformations.quaternion_multiply(inv_heading_rot, tar_root_rot)
-            tar_root_rot = motion_util.standardize_quaternion(tar_root_rot)
-
-            motion.set_frame_root_pos(tar_root_pos, tar_pose)
-            motion.set_frame_root_rot(tar_root_rot, tar_pose)
-
-            tar_poses.append(tar_pose)
-        }
-       
-
-        std::vector<float> tar_obs = np.concatenate(tar_poses, axis=-1);
-
-        return tar_obs;
-
-    }
-
-    // ==================================== Private Methods ===========================================================
-
-    float _get_motion_time() {
-
-    }
-
-    std::vector<float> _get_active_motion(){
-
-    }
-
-    std::vector<float> _get_ref_base_position(){
-
-    }
-
-
-}
-
-// =======================================================================================================================
 std::vector<float> RL_Sim::Forward()
 {
     std::unique_lock<std::mutex> lock(this->model_mutex, std::try_to_lock);
@@ -586,6 +517,7 @@ std::vector<float> RL_Sim::Forward()
     std::vector<float> actions;
     if (this->params.Get<std::vector<int>>("observations_history").size() != 0)
     {
+        // [ "dof_pos_abs", "dof_vel", "ang_vel", "gravity_vec", "actions"]
         this->history_obs_buf.insert(clamped_obs);
         this->history_obs = this->history_obs_buf.get_obs_vec(this->params.Get<std::vector<int>>("observations_history"));
         // TODO: add the 4 ref motions obs here
@@ -657,3 +589,128 @@ int main(int argc, char **argv)
 #endif
     return 0;
 }
+
+
+class TargetMotions {
+
+    """
+        Class to build target motion observation array
+        Adapted from ImitationTask
+    """
+
+    public:
+        std::string ref_motion_filenames = motion_files;
+        bool enable_cycle_sync = true;
+        std::vector<float> tar_frame_steps = [1, 2, 10, 30];
+        float ref_state_init_prob = 0.9;
+        float warmup_time = 0.25;
+        RL_Sim env; 
+
+        void reset(){};
+
+        vector<float> build_target_obs(){
+            // Internal function to construct sequence of target frames for future timesteps. Returns array of target frames
+
+            std::vector<std::vector<float>> tar_poses;
+
+            float time0 = _get_motion_time();
+            float dt = this->env._get_env_time_step(); // TODO: how to reconcile env and related functions
+            std::vector<float> motion = _get_active_motion();
+
+            // robot = self._env.robot
+            std::vector<float> ref_base_pos = _get_ref_base_position();
+            std::vector<float> sim_base_rot = np.array(_get_base_orientation());
+
+            heading = _calc_heading(sim_base_rot);
+            // if self._tar_obs_noise is not None: // None by default, not used
+            //   heading += self._randn(0, self._tar_obs_noise[0])
+            inv_heading_rot = _quaternion_about_axis(-heading, [0, 0, 1]);
+
+            for (int& step : this->tar_frame_steps){
+
+                float tar_time = time0 + step * dt;
+                std::vector<float> tar_pose = _calc_ref_pose(tar_time);
+
+                std::vector<float> tar_root_pos = _get_frame_root_pos(tar_pose);
+                std::vector<float> tar_root_rot = _get_frame_root_rot(tar_pose);
+
+                tar_root_pos -= ref_base_pos;
+                tar_root_pos = _quaternion_rotate_point(tar_root_pos, inv_heading_rot);
+
+                tar_root_rot = _quaternion_multiply(inv_heading_rot, tar_root_rot);
+                tar_root_rot = _standardize_quaternion(tar_root_rot);
+
+                _set_frame_root_pos(tar_root_pos, tar_pose);
+                _set_frame_root_rot(tar_root_rot, tar_pose);
+
+                tar_poses.push_back(tar_pose);
+            }
+        
+
+            std::vector<float> tar_obs.insert(tar_poses);
+
+            return tar_obs;
+
+        };
+
+    private : 
+        float _get_motion_time() {
+            """Get the time since the start of the reference motion."""
+            float time = self._env.get_time_since_reset()
+
+            # Needed to ensure that during deployment, the first timestep will be at
+            # time = 0
+            if self._env.env_step_counter == 0:
+            self._episode_start_time_offset = -time
+
+            time += self._motion_time_offset
+            time += self._episode_start_time_offset
+
+            if self._curr_episode_warmup:
+            # if warmup is enabled, then apply a time offset to give the robot more
+            # time to move to the reference motion
+            time -= self._warmup_time
+
+            return time
+    };
+
+        std::vector<float> _get_active_motion(){
+            """Get index of the active reference motion currently being imitated.
+
+            Returns:
+            Index of the active reference motion.
+            """
+            return _ref_motions[_active_motion_id];
+
+    };
+
+        std::vector<float> _get_ref_base_position(){
+
+    };
+
+        std::vector<float> _get_base_orientation(){};
+
+        std::vector<float> _calc_heading(std::vector<float> x){};
+
+        std::vector<float> _quaternion_about_axis(std::vector<float> heading, std::vector<float> axis){};
+
+        std::vector<float> _calc_ref_pose(float time){};
+
+        std::vector<float> _get_frame_root_pos(std::vector<float> pose){};
+
+        std::vector<float> _get_frame_root_rot(std::vector<float> pose){};
+
+        std::vector<float> _quaternion_rotate_point(std::vector<float> pos, std::vector<float> rot){};
+
+        std::vector<float> _quaternion_multiply(std::vector<float> inv_heading_rot, std::vector<float> tar_root_rot){};
+
+        std::vector<float> _standardize_quaternion(std::vector<float> x){};
+
+        void _set_frame_root_pos(std::vector<float> pos, std::vector<float> pose){};
+
+        void _set_frame_root_rot(std::vector<float> rot, std::vector<float> pose){};
+
+
+};
+
+// =======================================================================================================================
