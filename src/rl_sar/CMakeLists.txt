@@ -397,11 +397,13 @@ if(NOT USE_CMAKE)
 endif()
 
 # executable for rl sim
+find_package(nlohmann_json 3.12.0 REQUIRED)
 if(NOT USE_CMAKE)
     add_executable(rl_sim src/rl_sim.cpp)
     target_link_libraries(rl_sim
         rl_sdk
         observation_buffer
+        jsoncpp
         ${YAML_CPP_LIBRARIES}
         Threads::Threads
     )
