@@ -11,86 +11,71 @@
 #include <cmath>
 #include <fstream>
 #include <algorithm>
-#include <nlohmann/json.hpp>
+#include "nlohmann/json.hpp"
 
 // Constants
 const int POS_SIZE = 3;
 const int ROT_SIZE = 4;
 
-class RL_Sim {
-private:
-    MotionData _motion;
-    std::vector<int> _tar_frame_steps = {1, 2};
-    std::vector<double> _origin_offset_rot = {0, 0, 0, 1};
-    std::vector<double> _origin_offset_pos = {0, 0, 0};
 
-public:
-    void load_motion(const std::string& filename) {
-        _motion.load(filename);
+// Quaternion operations
+std::vector<double> quaternion_multiply(const std::vector<double>& q1, const std::vector<double>& q2) {
+    std::vector<double> result(4);
+    result[0] = q1[3]*q2[0] + q1[0]*q2[3] + q1[1]*q2[2] - q1[2]*q2[1];
+    result[1] = q1[3]*q2[1] - q1[0]*q2[2] + q1[1]*q2[3] + q1[2]*q2[0];
+    result[2] = q1[3]*q2[2] + q1[0]*q2[1] - q1[1]*q2[0] + q1[2]*q2[3];
+    result[3] = q1[3]*q2[3] - q1[0]*q2[0] - q1[1]*q2[1] - q1[2]*q2[2];
+    return result;
+}
+
+std::vector<double> quaternion_inverse(const std::vector<double>& q) {
+    double norm = q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3];
+    std::vector<double> result(4);
+    result[0] = -q[0] / norm;
+    result[1] = -q[1] / norm;
+    result[2] = -q[2] / norm;
+    result[3] = q[3] / norm;
+    return result;
+}
+
+std::vector<double> quaternion_about_axis(double angle, const std::vector<double>& axis) {
+    double half_angle = angle / 2.0;
+    double sin_half = std::sin(half_angle);
+    std::vector<double> result(4);
+    result[0] = axis[0] * sin_half;
+    result[1] = axis[1] * sin_half;
+    result[2] = axis[2] * sin_half;
+    result[3] = std::cos(half_angle);
+    return result;
+}
+
+std::vector<double> quaternion_rotate_point(const std::vector<double>& point, const std::vector<double>& quat) {
+    std::vector<double> q_point = {point[0], point[1], point[2], 0.0};
+    std::vector<double> quat_inv = quaternion_inverse(quat);
+    std::vector<double> temp = quaternion_multiply(quat, q_point);
+    std::vector<double> rotated = quaternion_multiply(temp, quat_inv);
+    return {rotated[0], rotated[1], rotated[2]};
+}
+
+double calc_heading(const std::vector<double>& q) {
+    std::vector<double> ref_dir = {1.0, 0.0, 0.0};
+    std::vector<double> rot_dir = quaternion_rotate_point(ref_dir, q);
+    return std::atan2(rot_dir[1], rot_dir[0]);
+}
+
+std::vector<double> standardize_quaternion(std::vector<double> q) {
+    if (q[3] < 0) {
+        q[0] = -q[0];
+        q[1] = -q[1];
+        q[2] = -q[2];
+        q[3] = -q[3];
     }
-
-    std::vector<double> build_target_obs(double time0, double dt, const std::vector<double>& sim_base_rot, const std::vector<double>& ref_base_pos) {
-        std::vector<std::vector<double>> tar_poses;
-
-        double heading = calc_heading(sim_base_rot);
-        std::vector<double> inv_heading_rot = quaternion_about_axis(-heading, {0, 0, 1});
-
-        for (int step : _tar_frame_steps) {
-            double tar_time = time0 + step * dt;
-            std::vector<double> tar_pose = _calc_ref_pose(tar_time);
-
-            std::vector<double> tar_root_pos = _motion.get_frame_root_pos(tar_pose);
-            std::vector<double> tar_root_rot = _motion.get_frame_root_rot(tar_pose);
-
-            for (int i = 0; i < 3; ++i) {
-                tar_root_pos[i] -= ref_base_pos[i];
-            }
-            tar_root_pos = quaternion_rotate_point(tar_root_pos, inv_heading_rot);
-
-            tar_root_rot = quaternion_multiply(inv_heading_rot, tar_root_rot);
-            tar_root_rot = standardize_quaternion(tar_root_rot);
-
-            _motion.set_frame_root_pos(tar_root_pos, tar_pose);
-            _motion.set_frame_root_rot(tar_root_rot, tar_pose);
-
-            tar_poses.push_back(tar_pose);
-        }
-
-        std::vector<double> tar_obs;
-        for (const auto& pose : tar_poses) {
-            tar_obs.insert(tar_obs.end(), pose.begin(), pose.end());
-        }
-
-        return tar_obs;
-    }
-
-private:
-    std::vector<double> _calc_ref_pose(double time) {
-        std::vector<double> pose = _motion.calc_frame(time);
-
-        // Apply origin offset
-        std::vector<double> root_pos = _motion.get_frame_root_pos(pose);
-        std::vector<double> root_rot = _motion.get_frame_root_rot(pose);
-
-        root_rot = quaternion_multiply(_origin_offset_rot, root_rot);
-        root_pos = quaternion_rotate_point(root_pos, _origin_offset_rot);
-        for (int i = 0; i < 3; ++i) {
-            root_pos[i] += _origin_offset_pos[i];
-        }
-
-        _motion.set_frame_root_rot(root_rot, pose);
-        _motion.set_frame_root_pos(root_pos, pose);
-
-        return pose;
-    }
-};
+    return q;
+}
 
 
 RL_Sim::RL_Sim(int argc, char **argv)
 {
-
-    load_motion(this->motion_filenames)
-
 #if defined(USE_ROS1)
     this->ang_vel_axis = "world";
     ros::NodeHandle nh;
@@ -335,6 +320,69 @@ void RL_Sim::StartJointController(const std::string& ros_namespace, const std::v
 #endif
 }
 
+
+// ========================================== Motion Imitation Functions
+
+    
+void RL_Sim::load_motion(const std::string& filename) {
+    this->_motion.load(filename);
+}
+
+std::vector<double> RL_Sim::build_target_obs(double time0, double dt, const std::vector<double>& sim_base_rot, const std::vector<double>& ref_base_pos) {
+    std::vector<std::vector<double>> tar_poses;
+
+    double heading = calc_heading(sim_base_rot);
+    std::vector<double> inv_heading_rot = quaternion_about_axis(-heading, {0, 0, 1});
+
+    for (int step : _tar_frame_steps) {
+        double tar_time = time0 + step * dt;
+        std::vector<double> tar_pose = _calc_ref_pose(tar_time);
+
+        std::vector<double> tar_root_pos = _motion.get_frame_root_pos(tar_pose);
+        std::vector<double> tar_root_rot = _motion.get_frame_root_rot(tar_pose);
+
+        for (int i = 0; i < 3; ++i) {
+            tar_root_pos[i] -= ref_base_pos[i];
+        }
+        tar_root_pos = quaternion_rotate_point(tar_root_pos, inv_heading_rot);
+
+        tar_root_rot = quaternion_multiply(inv_heading_rot, tar_root_rot);
+        tar_root_rot = standardize_quaternion(tar_root_rot);
+
+        _motion.set_frame_root_pos(tar_root_pos, tar_pose);
+        _motion.set_frame_root_rot(tar_root_rot, tar_pose);
+
+        tar_poses.push_back(tar_pose);
+    }
+
+    std::vector<double> tar_obs;
+    for (const auto& pose : tar_poses) {
+        tar_obs.insert(tar_obs.end(), pose.begin(), pose.end());
+    }
+
+    return tar_obs;
+}
+
+std::vector<double> RL_Sim::_calc_ref_pose(double time) {
+    std::vector<double> pose = _motion.calc_frame(time);
+
+    // Apply origin offset
+    std::vector<double> root_pos = _motion.get_frame_root_pos(pose);
+    std::vector<double> root_rot = _motion.get_frame_root_rot(pose);
+
+    root_rot = quaternion_multiply(_origin_offset_rot, root_rot);
+    root_pos = quaternion_rotate_point(root_pos, _origin_offset_rot);
+    for (int i = 0; i < 3; ++i) {
+        root_pos[i] += _origin_offset_pos[i];
+    }
+
+    _motion.set_frame_root_rot(root_rot, pose);
+    _motion.set_frame_root_pos(root_pos, pose);
+
+    return pose;
+}
+
+// ============================== END Motion Imitation Functions 
 void RL_Sim::GetState(RobotState<float> *state)
 {
 #if defined(USE_ROS1)
@@ -547,6 +595,7 @@ void RL_Sim::RunModel()
         this->episode_length_buf += 1;
         this->obs.ang_vel = this->robot_state.imu.gyroscope;
         this->obs.commands = {this->control.x, this->control.y, this->control.yaw};
+        this->ref_motions = this->load_motion("../policy/go2/motion_imitation/data/go2_run_config_11_pace.txt")
         if (this->control.navigation_mode)
         {
             this->obs.commands = {(float)this->cmd_vel.linear.x, (float)this->cmd_vel.linear.y, (float)this->cmd_vel.angular.z};
@@ -605,7 +654,7 @@ std::vector<float> RL_Sim::Forward()
         this->history_obs_buf.insert(clamped_obs);
         this->history_obs = this->history_obs_buf.get_obs_vec(this->params.Get<std::vector<int>>("observations_history"));
         // TODO: add the 4 ref motions obs here
-        this->history_obs = this->history_obs.insert(ImitationTask.get_ref_motions())
+        this->history_obs = this->history_obs.insert(this->build_target_obs())
 
         actions = this->model->forward({this->history_obs});
     }
@@ -652,418 +701,418 @@ void RL_Sim::Plot()
 
 //======================================================================================================================
 
-std::vector<float> RL_Sim::load_motions(std::vector<std::string> filenames){
-    int num_files = filenames.size();
+// std::vector<float> RL_Sim::load_motions(std::vector<std::string> filenames){
+//     int num_files = filenames.size();
 
-    std::vector<float> motions;
+//     std::vector<float> motions;
     
-    for (std::string f : filenames) {
-        // parse the JSON file
-        std::ifstream file(f);
-        std::string content(std::istreambuf_iterator<char>{file}, 
-            std::istreambuf_iterator<char>{});
-        value jv = parse(content);
+//     for (std::string f : filenames) {
+//         // parse the JSON file
+//         std::ifstream file(f);
+//         std::string content(std::istreambuf_iterator<char>{file}, 
+//             std::istreambuf_iterator<char>{});
+//         value jv = parse(content);
 
-        //extract data
-        auto motion = value_to<std::vector<std::vector<float>>>(jv.as_object()["Frames"]);
-        motions.push_back(motion);
-    }
+//         //extract data
+//         auto motion = value_to<std::vector<std::vector<float>>>(jv.as_object()["Frames"]);
+//         motions.push_back(motion);
+//     }
 
-    return motions;
-};
+//     return motions;
+// };
 
 
-std::vector<float> RL_Sim::build_target_obs(){
-    // Internal function to construct sequence of target frames for future timesteps. Returns array of target frames
+// std::vector<float> RL_Sim::build_target_obs(){
+//     // Internal function to construct sequence of target frames for future timesteps. Returns array of target frames
 
-    std::vector<std::vector<float>> tar_poses;
+//     std::vector<std::vector<float>> tar_poses;
 
-    float time0 = this->episode_length_buf * this->params.Get<float>("dt") * this->params.Get<int>("decimation");
+//     float time0 = this->episode_length_buf * this->params.Get<float>("dt") * this->params.Get<int>("decimation");
     
-    std::vector<float> motion = this->_get_active_motion();
+//     std::vector<float> motion = this->_get_active_motion();
 
-    std::vector<float> ref_base_pos = _get_ref_base_position();
-    std::vector<float> sim_base_rot = _get_base_orientation();
+//     std::vector<float> ref_base_pos = _get_ref_base_position();
+//     std::vector<float> sim_base_rot = _get_base_orientation();
 
-    heading = _calc_heading(sim_base_rot);
-    inv_heading_rot = _quaternion_about_axis(-heading, [0, 0, 1]);
+//     heading = _calc_heading(sim_base_rot);
+//     inv_heading_rot = _quaternion_about_axis(-heading, [0, 0, 1]);
 
-    for (int& step : this->tar_frame_steps){
+//     for (int& step : this->tar_frame_steps){
 
-        float tar_time = time0 + step * dt;
-        std::vector<float> tar_pose = this->_calc_ref_pose(tar_time);
+//         float tar_time = time0 + step * dt;
+//         std::vector<float> tar_pose = this->_calc_ref_pose(tar_time);
 
-        std::vector<float> tar_root_pos = _get_frame_root_pos(tar_pose);
-        std::vector<float> tar_root_rot = _get_frame_root_rot(tar_pose);
+//         std::vector<float> tar_root_pos = _get_frame_root_pos(tar_pose);
+//         std::vector<float> tar_root_rot = _get_frame_root_rot(tar_pose);
 
-        tar_root_pos -= ref_base_pos;
-        tar_root_pos = _quaternion_rotate_point(tar_root_pos, inv_heading_rot);
+//         tar_root_pos -= ref_base_pos;
+//         tar_root_pos = _quaternion_rotate_point(tar_root_pos, inv_heading_rot);
 
-        tar_root_rot = _quaternion_multiply(inv_heading_rot, tar_root_rot);
-        tar_root_rot = _standardize_quaternion(tar_root_rot);
+//         tar_root_rot = _quaternion_multiply(inv_heading_rot, tar_root_rot);
+//         tar_root_rot = _standardize_quaternion(tar_root_rot);
 
-        _set_frame_root_pos(tar_root_pos, tar_pose);
-        _set_frame_root_rot(tar_root_rot, tar_pose);
+//         _set_frame_root_pos(tar_root_pos, tar_pose);
+//         _set_frame_root_rot(tar_root_rot, tar_pose);
 
-        tar_poses.push_back(tar_pose);
-    }
-
-
-    std::vector<float> tar_obs.insert(tar_poses);
-
-    return tar_obs;
-
-};
+//         tar_poses.push_back(tar_pose);
+//     }
 
 
-std::vector<float> RL_Sim::_get_active_motion(){
-    """Get index of the active reference motion currently being imitated.
+//     std::vector<float> tar_obs.insert(tar_poses);
 
-    Returns:
-    Index of the active reference motion.
-    """
-    return this->_ref_motions[this->_active_motion_id];
+//     return tar_obs;
 
-};
+// };
 
-std::vector<float> _get_ref_base_position(){};
 
-std::vector<float> _get_base_orientation(){};
+// std::vector<float> RL_Sim::_get_active_motion(){
+//     """Get index of the active reference motion currently being imitated.
 
-std::vector<float> _calc_heading(std::vector<float> q){
-    """Returns the heading of a rotation q, specified as a quaternion.
+//     Returns:
+//     Index of the active reference motion.
+//     """
+//     return this->_ref_motions[this->_active_motion_id];
 
-    The heading represents the rotational component of q along the vertical
-    axis (z axis).
+// };
 
-    Args:
-        q: A quaternion that the heading is to be computed from.
+// std::vector<float> _get_ref_base_position(){};
 
-    Returns:
-        An angle representing the rotation about the z axis.
+// std::vector<float> _get_base_orientation(){};
 
-    """
-    std::vector<int> ref_dir = {1, 0, 0};
-    std::vector<float> rot_dir = _quaternion_rotate_point(ref_dir, q);
-    std::vector<float> heading = std::atan2(rot_dir[1], rot_dir[0]);
-    return heading;
+// std::vector<float> _calc_heading(std::vector<float> q){
+//     """Returns the heading of a rotation q, specified as a quaternion.
 
-};
+//     The heading represents the rotational component of q along the vertical
+//     axis (z axis).
 
-std::vector<float> _quaternion_about_axis(std::vector<float> heading, std::vector<float> axis){
+//     Args:
+//         q: A quaternion that the heading is to be computed from.
 
-};
+//     Returns:
+//         An angle representing the rotation about the z axis.
 
-std::vector<float> RL_Sim::_calc_ref_pose(float time, bool apply_origin_offset=true){
-    """Calculates the reference pose for a given point in time.
+//     """
+//     std::vector<int> ref_dir = {1, 0, 0};
+//     std::vector<float> rot_dir = _quaternion_rotate_point(ref_dir, q);
+//     std::vector<float> heading = std::atan2(rot_dir[1], rot_dir[0]);
+//     return heading;
 
-    Args:
-    time: Time elapsed since the start of the reference motion.
-    apply_origin_offset: A flag for enabling the origin offset to be applied
-        to the pose.
+// };
 
-    Returns:
-    An array containing the reference pose at the given point in time.
-    """
+// std::vector<float> _quaternion_about_axis(std::vector<float> heading, std::vector<float> axis){
+
+// };
+
+// std::vector<float> RL_Sim::_calc_ref_pose(float time, bool apply_origin_offset=true){
+//     """Calculates the reference pose for a given point in time.
+
+//     Args:
+//     time: Time elapsed since the start of the reference motion.
+//     apply_origin_offset: A flag for enabling the origin offset to be applied
+//         to the pose.
+
+//     Returns:
+//     An array containing the reference pose at the given point in time.
+//     """
     
-    std::vector<float> pose(3);
-    std::vector<float> motion = this->_get_active_motion();
-    bool enable_warmup_pose = this->_curr_episode_warmup && time >= -this->_warmup_time && time < 0.0;
+//     std::vector<float> pose(3);
+//     std::vector<float> motion = this->_get_active_motion();
+//     bool enable_warmup_pose = this->_curr_episode_warmup && time >= -this->_warmup_time && time < 0.0;
     
-    if (enable_warmup_pose){
+//     if (enable_warmup_pose){
 
-        pose = this->_calc_ref_pose_warmup();
-    }
+//         pose = this->_calc_ref_pose_warmup();
+//     }
     
-    else {
-        pose = this->_calc_frame(time);
-    };
-    
-
-    // if (apply_origin_offset){
-    //     std::vector<float> root_pos = _get_frame_root_pos(pose);
-    //     std::vector<float> root_rot = _get_frame_root_rot(pose);
-
-    //     root_rot = _quaternion_multiply(this->_origin_offset_rot,
-    //                                                 root_rot)
-    //     root_pos = _quaternion_rotate_point(root_pos, self._origin_offset_rot)
-    //     root_pos += this->_origin_offset_pos
-
-    //     _set_frame_root_rot(root_rot, pose)
-    //     _set_frame_root_pos(root_pos, pose)
-    // };
+//     else {
+//         pose = this->_calc_frame(time);
+//     };
     
 
-    return pose
-};
+//     // if (apply_origin_offset){
+//     //     std::vector<float> root_pos = _get_frame_root_pos(pose);
+//     //     std::vector<float> root_rot = _get_frame_root_rot(pose);
 
-std::vector<float> RL_Sim::_calc_frame(float time){
-    """Calculates the frame for a given point in time.
+//     //     root_rot = _quaternion_multiply(this->_origin_offset_rot,
+//     //                                                 root_rot)
+//     //     root_pos = _quaternion_rotate_point(root_pos, self._origin_offset_rot)
+//     //     root_pos += this->_origin_offset_pos
 
-    Args:
-      time: Time at which the frame is to be computed.
-    Return: An array containing the frame for the given point in time,
-      specifying the pose of the character.
-    """
-    f0, f1, blend = self.calc_blend_idx(time)
-
-    frame0 = self.get_frame(f0)
-    frame1 = self.get_frame(f1)
-    blend_frame = self.blend_frames(frame0, frame1, blend)
-
-    blend_root_pos = self.get_frame_root_pos(blend_frame)
-    blend_root_rot = self.get_frame_root_rot(blend_frame)
-
-    cycle_count = self.calc_cycle_count(time)
-    cycle_offset_pos = self._calc_cycle_offset_pos(cycle_count)
-    cycle_offset_rot = self._calc_cycle_offset_rot(cycle_count)
-
-    blend_root_pos = pose3d.QuaternionRotatePoint(blend_root_pos,
-                                                  cycle_offset_rot)
-    blend_root_pos += cycle_offset_pos
-
-    blend_root_rot = transformations.quaternion_multiply(
-        cycle_offset_rot, blend_root_rot)
-    blend_root_rot = motion_util.standardize_quaternion(blend_root_rot)
-
-    self.set_frame_root_pos(blend_root_pos, blend_frame)
-    self.set_frame_root_rot(blend_root_rot, blend_frame)
-
-    return blend_frame
-
-};
-
-std::vector<float> RL_Sim::_calc_ref_pose_warmup(){
-    """Calculate default reference  pose during warmup period."""
-    motion = this->_get_active_motion()
-    pose0 = motion.calc_frame(0)
-    warmup_pose = self._default_pose.copy()
-
-    pose_root_rot = motion.get_frame_root_rot(pose0)
-    default_root_rot = motion.get_frame_root_rot(warmup_pose)
-    default_root_pos = motion.get_frame_root_pos(warmup_pose)
-
-    pose_heading = motion_util.calc_heading(pose_root_rot)
-    default_heading = motion_util.calc_heading(default_root_rot)
-    delta_heading = pose_heading - default_heading
-    delta_heading_rot = transformations.quaternion_about_axis(
-        delta_heading, [0, 0, 1])
-
-    default_root_pos = pose3d.QuaternionRotatePoint(default_root_pos,
-                                                    delta_heading_rot)
-    default_root_rot = transformations.quaternion_multiply(
-        delta_heading_rot, default_root_rot)
-
-    motion.set_frame_root_pos(default_root_pos, warmup_pose)
-    motion.set_frame_root_rot(default_root_rot, warmup_pose)
-
-    return warmup_pose
-
-};
-
-std::vector<float> _get_frame_root_pos(std::vector<float> pose){};
-
-std::vector<float> _get_frame_root_rot(std::vector<float> pose){};
-
-std::vector<float> _quaternion_rotate_point(std::vector<float> point, std::vector<float> quat){
-    """Performs a rotation by quaternion.
-
-    Rotate the point by the quaternion using quaternion multiplication,
-    (q * p * q^-1), without constructing the rotation matrix.
-
-    Args:
-        point: The point to be rotated.
-        quat: The rotation represented as a quaternion [x, y, z, w].
-
-    Returns:
-        A 3D vector in a numpy array.
-    """
-
-    std::vector<float> q_point = {point[0], point[1], point[2], 0.0};
-    std::vector<float> quat_inverse = _quaternion_inverse(quat);
-    std::vector<float> x = _quaternion_multiply(quat, q_point);
-    std::vector<float> q_point_rotated = _quaternion_multiply(x, quat_inverse);
+//     //     _set_frame_root_rot(root_rot, pose)
+//     //     _set_frame_root_pos(root_pos, pose)
+//     // };
     
-    return q_point_rotated[:3];
-};
 
-std::vector<float> _quaternion_multiply(std::vector<float> quat_1, std::vector<float> quat_0){
-    """Return multiplication of two quaternions.
+//     return pose
+// };
 
-    >>> q = quaternion_multiply([1, -2, 3, 4], [-5, 6, 7, 8])
-    >>> numpy.allclose(q, [-44, -14, 48, 28])
-    True
+// std::vector<float> RL_Sim::_calc_frame(float time){
+//     """Calculates the frame for a given point in time.
 
-    """
-    float [x0, y0, z0, w0] = quat_0;
-    float [x1, y1, z1, w1] = quat_1;
-    std::vector<float> out = {x1*w0 + y1*z0 - z1*y0 + w1*x0,
-        -x1*z0 + y1*w0 + z1*x0 + w1*y0,
-        x1*y0 - y1*x0 + z1*w0 + w1*z0,
-        -x1*x0 - y1*y0 - z1*z0 + w1*w0};
-    return out;
+//     Args:
+//       time: Time at which the frame is to be computed.
+//     Return: An array containing the frame for the given point in time,
+//       specifying the pose of the character.
+//     """
+//     f0, f1, blend = self.calc_blend_idx(time)
+
+//     frame0 = self.get_frame(f0)
+//     frame1 = self.get_frame(f1)
+//     blend_frame = self.blend_frames(frame0, frame1, blend)
+
+//     blend_root_pos = self.get_frame_root_pos(blend_frame)
+//     blend_root_rot = self.get_frame_root_rot(blend_frame)
+
+//     cycle_count = self.calc_cycle_count(time)
+//     cycle_offset_pos = self._calc_cycle_offset_pos(cycle_count)
+//     cycle_offset_rot = self._calc_cycle_offset_rot(cycle_count)
+
+//     blend_root_pos = pose3d.QuaternionRotatePoint(blend_root_pos,
+//                                                   cycle_offset_rot)
+//     blend_root_pos += cycle_offset_pos
+
+//     blend_root_rot = transformations.quaternion_multiply(
+//         cycle_offset_rot, blend_root_rot)
+//     blend_root_rot = motion_util.standardize_quaternion(blend_root_rot)
+
+//     self.set_frame_root_pos(blend_root_pos, blend_frame)
+//     self.set_frame_root_rot(blend_root_rot, blend_frame)
+
+//     return blend_frame
+
+// };
+
+// std::vector<float> RL_Sim::_calc_ref_pose_warmup(){
+//     """Calculate default reference  pose during warmup period."""
+//     motion = this->_get_active_motion()
+//     pose0 = motion.calc_frame(0)
+//     warmup_pose = self._default_pose.copy()
+
+//     pose_root_rot = motion.get_frame_root_rot(pose0)
+//     default_root_rot = motion.get_frame_root_rot(warmup_pose)
+//     default_root_pos = motion.get_frame_root_pos(warmup_pose)
+
+//     pose_heading = motion_util.calc_heading(pose_root_rot)
+//     default_heading = motion_util.calc_heading(default_root_rot)
+//     delta_heading = pose_heading - default_heading
+//     delta_heading_rot = transformations.quaternion_about_axis(
+//         delta_heading, [0, 0, 1])
+
+//     default_root_pos = pose3d.QuaternionRotatePoint(default_root_pos,
+//                                                     delta_heading_rot)
+//     default_root_rot = transformations.quaternion_multiply(
+//         delta_heading_rot, default_root_rot)
+
+//     motion.set_frame_root_pos(default_root_pos, warmup_pose)
+//     motion.set_frame_root_rot(default_root_rot, warmup_pose)
+
+//     return warmup_pose
+
+// };
+
+// std::vector<float> _get_frame_root_pos(std::vector<float> pose){};
+
+// std::vector<float> _get_frame_root_rot(std::vector<float> pose){};
+
+// std::vector<float> _quaternion_rotate_point(std::vector<float> point, std::vector<float> quat){
+//     """Performs a rotation by quaternion.
+
+//     Rotate the point by the quaternion using quaternion multiplication,
+//     (q * p * q^-1), without constructing the rotation matrix.
+
+//     Args:
+//         point: The point to be rotated.
+//         quat: The rotation represented as a quaternion [x, y, z, w].
+
+//     Returns:
+//         A 3D vector in a numpy array.
+//     """
+
+//     std::vector<float> q_point = {point[0], point[1], point[2], 0.0};
+//     std::vector<float> quat_inverse = _quaternion_inverse(quat);
+//     std::vector<float> x = _quaternion_multiply(quat, q_point);
+//     std::vector<float> q_point_rotated = _quaternion_multiply(x, quat_inverse);
+    
+//     return q_point_rotated[:3];
+// };
+
+// std::vector<float> _quaternion_multiply(std::vector<float> quat_1, std::vector<float> quat_0){
+//     """Return multiplication of two quaternions.
+
+//     >>> q = quaternion_multiply([1, -2, 3, 4], [-5, 6, 7, 8])
+//     >>> numpy.allclose(q, [-44, -14, 48, 28])
+//     True
+
+//     """
+//     float [x0, y0, z0, w0] = quat_0;
+//     float [x1, y1, z1, w1] = quat_1;
+//     std::vector<float> out = {x1*w0 + y1*z0 - z1*y0 + w1*x0,
+//         -x1*z0 + y1*w0 + z1*x0 + w1*y0,
+//         x1*y0 - y1*x0 + z1*w0 + w1*z0,
+//         -x1*x0 - y1*y0 - z1*z0 + w1*w0};
+//     return out;
 
 
-// ===================================================== Utils =============================================================
+// // ===================================================== Utils =============================================================
 
-// Quaternion operations
-std::vector<double> quaternion_multiply(const std::vector<double>& q1, const std::vector<double>& q2) {
-    std::vector<double> result(4);
-    result[0] = q1[3]*q2[0] + q1[0]*q2[3] + q1[1]*q2[2] - q1[2]*q2[1];
-    result[1] = q1[3]*q2[1] - q1[0]*q2[2] + q1[1]*q2[3] + q1[2]*q2[0];
-    result[2] = q1[3]*q2[2] + q1[0]*q2[1] - q1[1]*q2[0] + q1[2]*q2[3];
-    result[3] = q1[3]*q2[3] - q1[0]*q2[0] - q1[1]*q2[1] - q1[2]*q2[2];
-    return result;
-}
+// // Quaternion operations
+// std::vector<double> quaternion_multiply(const std::vector<double>& q1, const std::vector<double>& q2) {
+//     std::vector<double> result(4);
+//     result[0] = q1[3]*q2[0] + q1[0]*q2[3] + q1[1]*q2[2] - q1[2]*q2[1];
+//     result[1] = q1[3]*q2[1] - q1[0]*q2[2] + q1[1]*q2[3] + q1[2]*q2[0];
+//     result[2] = q1[3]*q2[2] + q1[0]*q2[1] - q1[1]*q2[0] + q1[2]*q2[3];
+//     result[3] = q1[3]*q2[3] - q1[0]*q2[0] - q1[1]*q2[1] - q1[2]*q2[2];
+//     return result;
+// }
 
-std::vector<double> quaternion_inverse(const std::vector<double>& q) {
-    double norm = q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3];
-    std::vector<double> result(4);
-    result[0] = -q[0] / norm;
-    result[1] = -q[1] / norm;
-    result[2] = -q[2] / norm;
-    result[3] = q[3] / norm;
-    return result;
-}
+// std::vector<double> quaternion_inverse(const std::vector<double>& q) {
+//     double norm = q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3];
+//     std::vector<double> result(4);
+//     result[0] = -q[0] / norm;
+//     result[1] = -q[1] / norm;
+//     result[2] = -q[2] / norm;
+//     result[3] = q[3] / norm;
+//     return result;
+// }
 
-std::vector<double> quaternion_about_axis(double angle, const std::vector<double>& axis) {
-    double half_angle = angle / 2.0;
-    double sin_half = std::sin(half_angle);
-    std::vector<double> result(4);
-    result[0] = axis[0] * sin_half;
-    result[1] = axis[1] * sin_half;
-    result[2] = axis[2] * sin_half;
-    result[3] = std::cos(half_angle);
-    return result;
-}
+// std::vector<double> quaternion_about_axis(double angle, const std::vector<double>& axis) {
+//     double half_angle = angle / 2.0;
+//     double sin_half = std::sin(half_angle);
+//     std::vector<double> result(4);
+//     result[0] = axis[0] * sin_half;
+//     result[1] = axis[1] * sin_half;
+//     result[2] = axis[2] * sin_half;
+//     result[3] = std::cos(half_angle);
+//     return result;
+// }
 
-std::vector<double> quaternion_rotate_point(const std::vector<double>& point, const std::vector<double>& quat) {
-    std::vector<double> q_point = {point[0], point[1], point[2], 0.0};
-    std::vector<double> quat_inv = quaternion_inverse(quat);
-    std::vector<double> temp = quaternion_multiply(quat, q_point);
-    std::vector<double> rotated = quaternion_multiply(temp, quat_inv);
-    return {rotated[0], rotated[1], rotated[2]};
-}
+// std::vector<double> quaternion_rotate_point(const std::vector<double>& point, const std::vector<double>& quat) {
+//     std::vector<double> q_point = {point[0], point[1], point[2], 0.0};
+//     std::vector<double> quat_inv = quaternion_inverse(quat);
+//     std::vector<double> temp = quaternion_multiply(quat, q_point);
+//     std::vector<double> rotated = quaternion_multiply(temp, quat_inv);
+//     return {rotated[0], rotated[1], rotated[2]};
+// }
 
-double calc_heading(const std::vector<double>& q) {
-    std::vector<double> ref_dir = {1.0, 0.0, 0.0};
-    std::vector<double> rot_dir = quaternion_rotate_point(ref_dir, q);
-    return std::atan2(rot_dir[1], rot_dir[0]);
-}
+// double calc_heading(const std::vector<double>& q) {
+//     std::vector<double> ref_dir = {1.0, 0.0, 0.0};
+//     std::vector<double> rot_dir = quaternion_rotate_point(ref_dir, q);
+//     return std::atan2(rot_dir[1], rot_dir[0]);
+// }
 
-std::vector<double> standardize_quaternion(std::vector<double> q) {
-    if (q[3] < 0) {
-        q[0] = -q[0];
-        q[1] = -q[1];
-        q[2] = -q[2];
-        q[3] = -q[3];
-    }
-    return q;
-}
+// std::vector<double> standardize_quaternion(std::vector<double> q) {
+//     if (q[3] < 0) {
+//         q[0] = -q[0];
+//         q[1] = -q[1];
+//         q[2] = -q[2];
+//         q[3] = -q[3];
+//     }
+//     return q;
+// }
 
-// MotionData class
-class MotionData {
-public:
-    std::vector<std::vector<double>> _frames;
-    double _frame_duration;
-    int _loop_mode; // 0 for Clamp, 1 for Wrap
+// // MotionData class
+// class MotionData {
+// public:
+//     std::vector<std::vector<double>> _frames;
+//     double _frame_duration;
+//     int _loop_mode; // 0 for Clamp, 1 for Wrap
 
-    void load(const std::string& motion_file) {
-        std::ifstream f(motion_file);
-        nlohmann::json motion_json = nlohmann::json::parse(f);
+//     void load(const std::string& motion_file) {
+//         std::ifstream f(motion_file);
+//         nlohmann::json motion_json = nlohmann::json::parse(f);
 
-        _loop_mode = motion_json["LoopMode"] == "Wrap" ? 1 : 0;
-        _frame_duration = motion_json["FrameDuration"];
-        _frames = motion_json["Frames"].get<std::vector<std::vector<double>>>();
+//         _loop_mode = motion_json["LoopMode"] == "Wrap" ? 1 : 0;
+//         _frame_duration = motion_json["FrameDuration"];
+//         _frames = motion_json["Frames"].get<std::vector<std::vector<double>>>();
 
-        // Postprocess frames if needed
-        _postprocess_frames();
-    }
+//         // Postprocess frames if needed
+//         _postprocess_frames();
+//     }
 
-    void _postprocess_frames() {
-        if (!_frames.empty()) {
-            std::vector<double> first_frame = _frames[0];
-            std::vector<double> pos_start = get_frame_root_pos(first_frame);
+//     void _postprocess_frames() {
+//         if (!_frames.empty()) {
+//             std::vector<double> first_frame = _frames[0];
+//             std::vector<double> pos_start = get_frame_root_pos(first_frame);
 
-            for (auto& frame : _frames) {
-                std::vector<double> root_pos = get_frame_root_pos(frame);
-                root_pos[0] -= pos_start[0];
-                root_pos[1] -= pos_start[1];
-                set_frame_root_pos(root_pos, frame);
+//             for (auto& frame : _frames) {
+//                 std::vector<double> root_pos = get_frame_root_pos(frame);
+//                 root_pos[0] -= pos_start[0];
+//                 root_pos[1] -= pos_start[1];
+//                 set_frame_root_pos(root_pos, frame);
 
-                std::vector<double> root_rot = get_frame_root_rot(frame);
-                // Normalize quaternion (assuming it's already normalized)
-                root_rot = standardize_quaternion(root_rot);
-                set_frame_root_rot(root_rot, frame);
-            }
-        }
-    }
+//                 std::vector<double> root_rot = get_frame_root_rot(frame);
+//                 // Normalize quaternion (assuming it's already normalized)
+//                 root_rot = standardize_quaternion(root_rot);
+//                 set_frame_root_rot(root_rot, frame);
+//             }
+//         }
+//     }
 
-    std::vector<double> get_frame(int idx) {
-        return _frames[idx];
-    }
+//     std::vector<double> get_frame(int idx) {
+//         return _frames[idx];
+//     }
 
-    std::vector<double> calc_frame(double time) {
-        int f0, f1;
-        double blend;
-        calc_blend_idx(time, f0, f1, blend);
+//     std::vector<double> calc_frame(double time) {
+//         int f0, f1;
+//         double blend;
+//         calc_blend_idx(time, f0, f1, blend);
 
-        std::vector<double> frame0 = get_frame(f0);
-        std::vector<double> frame1 = get_frame(f1);
-        std::vector<double> blend_frame = blend_frames(frame0, frame1, blend);
+//         std::vector<double> frame0 = get_frame(f0);
+//         std::vector<double> frame1 = get_frame(f1);
+//         std::vector<double> blend_frame = blend_frames(frame0, frame1, blend);
 
-        // For simplicity, ignoring cycle offset for now
-        return blend_frame;
-    }
+//         // For simplicity, ignoring cycle offset for now
+//         return blend_frame;
+//     }
 
-    void calc_blend_idx(double time, int& f0, int& f1, double& blend) {
-        double duration = get_duration();
-        double num_frames = _frames.size();
-        double frame_time = time / _frame_duration;
-        f0 = static_cast<int>(std::floor(frame_time)) % static_cast<int>(num_frames);
-        f1 = (f0 + 1) % static_cast<int>(num_frames);
-        blend = frame_time - std::floor(frame_time);
-    }
+//     void calc_blend_idx(double time, int& f0, int& f1, double& blend) {
+//         double duration = get_duration();
+//         double num_frames = _frames.size();
+//         double frame_time = time / _frame_duration;
+//         f0 = static_cast<int>(std::floor(frame_time)) % static_cast<int>(num_frames);
+//         f1 = (f0 + 1) % static_cast<int>(num_frames);
+//         blend = frame_time - std::floor(frame_time);
+//     }
 
-    std::vector<double> blend_frames(const std::vector<double>& frame0, const std::vector<double>& frame1, double blend) {
-        std::vector<double> result(frame0.size());
-        for (size_t i = 0; i < frame0.size(); ++i) {
-            result[i] = frame0[i] * (1.0 - blend) + frame1[i] * blend;
-        }
-        // Special handling for quaternions
-        size_t pos_end = POS_SIZE + ROT_SIZE;
-        for (size_t i = POS_SIZE; i < pos_end; ++i) {
-            // Slerp for quaternions, but for simplicity, linear blend
-            result[i] = frame0[i] * (1.0 - blend) + frame1[i] * blend;
-        }
-        return result;
-    }
+//     std::vector<double> blend_frames(const std::vector<double>& frame0, const std::vector<double>& frame1, double blend) {
+//         std::vector<double> result(frame0.size());
+//         for (size_t i = 0; i < frame0.size(); ++i) {
+//             result[i] = frame0[i] * (1.0 - blend) + frame1[i] * blend;
+//         }
+//         // Special handling for quaternions
+//         size_t pos_end = POS_SIZE + ROT_SIZE;
+//         for (size_t i = POS_SIZE; i < pos_end; ++i) {
+//             // Slerp for quaternions, but for simplicity, linear blend
+//             result[i] = frame0[i] * (1.0 - blend) + frame1[i] * blend;
+//         }
+//         return result;
+//     }
 
-    double get_duration() {
-        return _frames.size() * _frame_duration;
-    }
+//     double get_duration() {
+//         return _frames.size() * _frame_duration;
+//     }
 
-    std::vector<double> get_frame_root_pos(const std::vector<double>& frame) {
-        return {frame[0], frame[1], frame[2]};
-    }
+//     std::vector<double> get_frame_root_pos(const std::vector<double>& frame) {
+//         return {frame[0], frame[1], frame[2]};
+//     }
 
-    void set_frame_root_pos(const std::vector<double>& root_pos, std::vector<double>& out_frame) {
-        out_frame[0] = root_pos[0];
-        out_frame[1] = root_pos[1];
-        out_frame[2] = root_pos[2];
-    }
+//     void set_frame_root_pos(const std::vector<double>& root_pos, std::vector<double>& out_frame) {
+//         out_frame[0] = root_pos[0];
+//         out_frame[1] = root_pos[1];
+//         out_frame[2] = root_pos[2];
+//     }
 
-    std::vector<double> get_frame_root_rot(const std::vector<double>& frame) {
-        return {frame[3], frame[4], frame[5], frame[6]};
-    }
+//     std::vector<double> get_frame_root_rot(const std::vector<double>& frame) {
+//         return {frame[3], frame[4], frame[5], frame[6]};
+//     }
 
-    void set_frame_root_rot(const std::vector<double>& root_rot, std::vector<double>& out_frame) {
-        out_frame[3] = root_rot[0];
-        out_frame[4] = root_rot[1];
-        out_frame[5] = root_rot[2];
-        out_frame[6] = root_rot[3];
-    }
-};
+//     void set_frame_root_rot(const std::vector<double>& root_rot, std::vector<double>& out_frame) {
+//         out_frame[3] = root_rot[0];
+//         out_frame[4] = root_rot[1];
+//         out_frame[5] = root_rot[2];
+//         out_frame[6] = root_rot[3];
+//     }
+// };
 
 
 #if defined(USE_ROS1)

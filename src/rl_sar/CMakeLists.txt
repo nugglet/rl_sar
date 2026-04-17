@@ -397,15 +397,43 @@ if(NOT USE_CMAKE)
 endif()
 
 # executable for rl sim
-find_package(nlohmann_json 3.12.0 REQUIRED)
+# nlohmann json sdk
+# find_package(nlohmann_json 3.2.0 QUIET)
+
+# if(nlohmann_json_FOUND)
+# 	message(STATUS "Nlohmann JSON Found.")
+# else()
+# 	message(STATUS "Nlohmann JSON not found; will use included version.")
+# 	include("${CMAKE_SOURCE_DIR}/library/thirdparty/nlohmann_json/CMakeLists.txt")
+# endif()
+
+# if(nlohmann_json_FOUND)
+# 	target_link_libraries(rl_sim PRIVATE nlohmann_json::nlohmann_json)
+# 	# set_target_properties(nlohmann_json::nlohmann_json PROPERTIES INTERFACE_COMPILE_FEATURES ${COMPUTED_CXX_STD})
+# else()
+# 	target_link_libraries(rl_sim nlohmann_json)
+# 	# set_target_properties(nlohmann_json PROPERTIES INTERFACE_COMPILE_FEATURES ${COMPUTED_CXX_STD})
+# endif()
+
+# add_executable(example example.cpp)
+# target_link_libraries(example PRIVATE nlohmann_json::nlohmann_json)
+
+# add_library(nlohmann INTERFACE)
+# target_include_directories(nlohmann INTERFACE
+#     library/thirdparty/nlohmann/json
+#     )
+# target_link_libraries(nlohmann INTERFACE nlohmann_json::nlohmann_json)
+
 if(NOT USE_CMAKE)
+    find_package(nlohmann_json 3.2.0 QUIET)
     add_executable(rl_sim src/rl_sim.cpp)
+    target_include_directories(rl_sim INTERFACE ${CMAKE_SOURCE_DIR}/library/thirdparty/nlohmann_json/single_include/nlohmann/json.hpp)
     target_link_libraries(rl_sim
         rl_sdk
         observation_buffer
-        jsoncpp
         ${YAML_CPP_LIBRARIES}
         Threads::Threads
+        nlohmann_json::nlohmann_json
     )
     if($ENV{ROS_DISTRO} MATCHES "noetic")
         target_link_libraries(rl_sim ${catkin_LIBRARIES})

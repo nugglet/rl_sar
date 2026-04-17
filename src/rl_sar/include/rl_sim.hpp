@@ -25,6 +25,10 @@
 #include <fstream>
 #include <stdexcept>
 
+#include "nlohmann/json.hpp"
+// #include "library/nlohmann/json.hpp"
+using json = nlohmann::json;
+
 #if defined(USE_ROS1)
 #include <ros/ros.h>
 #include "std_srvs/Empty.h"
@@ -46,13 +50,133 @@
 #endif
 
 #include "matplotlibcpp.h"
+
+
 namespace plt = matplotlibcpp;
+
+// Constants
+const int POS_SIZE = 3;
+const int ROT_SIZE = 4;
+
+
+// MotionData class
+class MotionData {
+public:
+    std::vector<std::vector<double>> _frames;
+    double _frame_duration;
+    int _loop_mode; // 0 for Clamp, 1 for Wrap
+
+    void load(const std::string& motion_file) {
+        std::ifstream f(motion_file);
+        json::json motion_json = json::parse(f);
+
+        _loop_mode = motion_json["LoopMode"] == "Wrap" ? 1 : 0;
+        _frame_duration = motion_json["FrameDuration"];
+        _frames = motion_json["Frames"].get<std::vector<std::vector<double>>>();
+
+        // Postprocess frames if needed
+        _postprocess_frames();
+    }
+
+    void _postprocess_frames() {
+        if (!_frames.empty()) {
+            std::vector<double> first_frame = _frames[0];
+            std::vector<double> pos_start = get_frame_root_pos(first_frame);
+
+            for (auto& frame : _frames) {
+                std::vector<double> root_pos = get_frame_root_pos(frame);
+                root_pos[0] -= pos_start[0];
+                root_pos[1] -= pos_start[1];
+                set_frame_root_pos(root_pos, frame);
+
+                std::vector<double> root_rot = get_frame_root_rot(frame);
+                // Normalize quaternion (assuming it's already normalized)
+                root_rot = standardize_quaternion(root_rot);
+                set_frame_root_rot(root_rot, frame);
+            }
+        }
+    }
+
+    std::vector<double> get_frame(int idx) {
+        return _frames[idx];
+    }
+
+    std::vector<double> calc_frame(double time) {
+        int f0, f1;
+        double blend;
+        calc_blend_idx(time, f0, f1, blend);
+
+        std::vector<double> frame0 = get_frame(f0);
+        std::vector<double> frame1 = get_frame(f1);
+        std::vector<double> blend_frame = blend_frames(frame0, frame1, blend);
+
+        // For simplicity, ignoring cycle offset for now
+        return blend_frame;
+    }
+
+    void calc_blend_idx(double time, int& f0, int& f1, double& blend) {
+        double duration = get_duration();
+        double num_frames = _frames.size();
+        double frame_time = time / _frame_duration;
+        f0 = static_cast<int>(std::floor(frame_time)) % static_cast<int>(num_frames);
+        f1 = (f0 + 1) % static_cast<int>(num_frames);
+        blend = frame_time - std::floor(frame_time);
+    }
+
+    std::vector<double> blend_frames(const std::vector<double>& frame0, const std::vector<double>& frame1, double blend) {
+        std::vector<double> result(frame0.size());
+        for (size_t i = 0; i < frame0.size(); ++i) {
+            result[i] = frame0[i] * (1.0 - blend) + frame1[i] * blend;
+        }
+        // Special handling for quaternions
+        size_t pos_end = POS_SIZE + ROT_SIZE;
+        for (size_t i = POS_SIZE; i < pos_end; ++i) {
+            // Slerp for quaternions, but for simplicity, linear blend
+            result[i] = frame0[i] * (1.0 - blend) + frame1[i] * blend;
+        }
+        return result;
+    }
+
+    double get_duration() {
+        return _frames.size() * _frame_duration;
+    }
+
+    std::vector<double> get_frame_root_pos(const std::vector<double>& frame) {
+        return {frame[0], frame[1], frame[2]};
+    }
+
+    void set_frame_root_pos(const std::vector<double>& root_pos, std::vector<double>& out_frame) {
+        out_frame[0] = root_pos[0];
+        out_frame[1] = root_pos[1];
+        out_frame[2] = root_pos[2];
+    }
+
+    std::vector<double> get_frame_root_rot(const std::vector<double>& frame) {
+        return {frame[3], frame[4], frame[5], frame[6]};
+    }
+
+    void set_frame_root_rot(const std::vector<double>& root_rot, std::vector<double>& out_frame) {
+        out_frame[3] = root_rot[0];
+        out_frame[4] = root_rot[1];
+        out_frame[5] = root_rot[2];
+        out_frame[6] = root_rot[3];
+    }
+};
 
 class RL_Sim : public RL
 {
 public:
     RL_Sim(int argc, char **argv);
     ~RL_Sim();
+
+    MotionData _motion;
+    std::vector<int> _tar_frame_steps = {1, 2};
+    std::vector<double> _origin_offset_rot = {0, 0, 0, 1};
+    std::vector<double> _origin_offset_pos = {0, 0, 0};
+
+    void load_motion(const std::string& filename);
+    std::vector<double> build_target_obs(double time0, double dt, const std::vector<double>& sim_base_rot, const std::vector<double>& ref_base_pos);
+  
 
 #if defined(USE_ROS2)
     std::shared_ptr<rclcpp::Node> ros2_node;
@@ -65,6 +189,7 @@ private:
     void SetCommand(const RobotCommand<float> *command) override;
     void RunModel();
     void RobotControl();
+    std::vector<double> _calc_ref_pose(double time);
 
     // loop
     std::shared_ptr<LoopFunc> loop_keyboard;
